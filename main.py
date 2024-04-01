@@ -36,9 +36,11 @@ import json  # Add this import
 import sqlite3
 import os
 
-#- DATA  -#
-closed_tabs_stack = []
-#=========#
+#- DATA  ----------------------------------------------------------------#
+closed_tabs_stack = []    # Closed Tabs for Undo History
+tab_start_times   = {}    # Dictionary to store start times for each tab
+tab_active_times  = {}    # Dictionary to store time active for each tab
+#========================================================================#
 
 def run_applescript(script):
     return subprocess.run(['osascript', '-e', script], capture_output=True, text=True)
@@ -47,7 +49,7 @@ def run_applescript(script):
 # def run_applescript_background(script):
 #     subprocess.Popen(['osascript', '-e', script], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-# ~~~ APPLESCRIPTS ~~~ #
+# ~~~ APPLESCRIPTS ~~~  -------------------------------------------------#
 def get_safari_tabs():
     script = '''
     set output to "["
@@ -67,27 +69,6 @@ def get_safari_tabs():
         end repeat
     end tell
     return output & "]"
-    '''
-    return run_applescript(script)
-
-def select_safari_tab(tab_letter):
-    letter_to_index = dict(zip(string.ascii_lowercase, range(1, 27)))
-    tab_index = letter_to_index.get(tab_letter, 0)
-    script = f'''
-    tell application "Safari"
-        set counter to 1
-        repeat with aWindow in windows
-            repeat with aTab in tabs of aWindow
-                if counter = {tab_index} then
-                    set current tab of aWindow to aTab
-                    # set index of aWindow to 1 -- Bring the window to the front
-                    # tell application "System Events" to tell process "Safari" to set frontmost to true
-                    return
-                end if
-                set counter to counter + 1
-            end repeat
-        end repeat
-    end tell
     '''
     return run_applescript(script)
 
@@ -138,8 +119,15 @@ def activate_safari():
     '''
     return run_applescript(script)
 
+# Manage Safari Tab - select or close tab!
 def manage_safari_tab(tab_letter, close_tab=False):
+
     global closed_tabs_stack
+    global tab_start_times
+
+    # Store the start time when selecting a tab
+    if not close_tab:
+        tab_start_times[tab_letter] = time.time()
 
     letter_to_index = dict(zip(string.ascii_lowercase, range(1, 27)))
     tab_index = letter_to_index.get(tab_letter.lower(), 0)  # Ensure lowercase for indexing
@@ -177,10 +165,10 @@ def manage_safari_tab(tab_letter, close_tab=False):
         end tell
         '''
     return run_applescript(script)
-# ~~~ END APPLESCRIPTS ~~~ #
+# ~~~ END APPLESCRIPTS ~~~ ==============================================#
 
-# ---- UI Functions ---- #
-def show_tabs_full(stdscr, tabs):
+# ---- UI Functions -----------------------------------------------------#
+def ui_show_tabs_full(stdscr, tabs):
     stdscr.clear()
     for idx, tab in enumerate(tabs, start=1):
         # Terminal Dimensions Check
@@ -203,7 +191,7 @@ def show_tabs_full(stdscr, tabs):
         stdscr.addstr(display_str)
     stdscr.refresh()
 
-def show_tabs(stdscr, tabs):
+def ui_show_tabs(stdscr, tabs):
     stdscr.clear()
     for idx, tab in enumerate(tabs, start=1):
         # Terminal Dimensions Check
@@ -258,7 +246,14 @@ def show_tabs(stdscr, tabs):
             stdscr.addstr(display_str)
     stdscr.refresh()
 
-# ----- END UI Functions------ #
+def ui_print_header(stdscr):
+    curses.init_pair(1, 60, -1)
+    stdscr.attron(curses.color_pair(1))
+    stdscr.addstr("Safari Tabs\n")
+    stdscr.attroff(curses.color_pair(1))
+# ===== END UI Functions  ===============================================#
+
+# ---- Search -----------------------------------------------------------#
 def perform_search(stdscr, query):
     # Expand the path and connect to the database
     db_path = os.path.expanduser('~/Library/Safari/History.db')
@@ -328,7 +323,11 @@ def perform_search(stdscr, query):
             offset -= 1
         elif ch == ord('j') and offset < len(results) - max_y:  # Scroll down
             offset += 1
-
+# ===== END Search  =====================================================#
+            
+#------------------------------------------------------------------------@
+#       MAIN
+#------------------------------------------------------------------------@
 def main_loop(stdscr):
     ## Init Curses 
     curses.start_color()
@@ -336,76 +335,74 @@ def main_loop(stdscr):
     curses.curs_set(0)  # Hide the cursor for a cleaner display
 
     #- FLAGS -#
-    search_mode = False  # New flag for search mode
-    show_full_title = False  # Toggle state for showing full titles
+    fSearchMode          = False           # Manage control flow for normal vs search mode
+    fShowFullTitle       = False       # Toggle Display: full tab title
+    fShowTabTimeActive   = False  # Toggle Display: how much time each tab has been open
     #=========#
     search_query = ""
 
-
     while True:
         stdscr.clear()
-        curses.init_pair(1, 60, -1)
-        stdscr.attron(curses.color_pair(1))
-        stdscr.addstr("Safari Tabs\n")
-        stdscr.attroff(curses.color_pair(1))
+        ui_print_header(stdscr)
 
-        if not search_mode:
+        if not fSearchMode: # <------- If we're not in search mode, provide the normal tab browser UI
             global closed_tabs_stack
 
             # Fetch and process tabs
             result = get_safari_tabs()
+            # TODO: Put this in a background process
             if result.returncode == 0 and result.stdout:
                 try:
                     tabs = json.loads(result.stdout)
-                    tabs = tabs[:26]  # Limit to 26 tabs if needed
-                    if show_full_title:
-                        show_tabs_full(stdscr, tabs)  # Function to show tabs with full titles
+                    tabs = tabs[:26]                     #    Limit set to 26 tabs
+                    if fShowFullTitle:
+                        ui_show_tabs_full(stdscr, tabs)  # 1. Show tabs with full titles if mode has been toggled
                     else:
-                        show_tabs(stdscr, tabs)  # Existing function to show tabs with shortened titles
+                        ui_show_tabs(stdscr, tabs)       # 2. Show tabs in normal shortened mode
                 except json.JSONDecodeError:
                     stdscr.addstr("Error decoding JSON\n")
             else:
                 stdscr.addstr("Error fetching tabs\n")
 
-            # Non-blocking input with timeout
-            stdscr.nodelay(True)  # Make getch() non-blocking
+            # START GET USER KEY INPUT ... Non-blocking input with timeout
+            stdscr.nodelay(True) # Make getch() non-blocking
             stdscr.timeout(100)  # Reduced timeout for more responsive toggle
             
             ch = stdscr.getch()
-            if ch != -1:  # If a key was pressed
+            if ch != -1:                                 # If a key was pressed
                 if ch == ord('.'):
-                    show_full_title = not show_full_title  # Toggle the flag
-                elif 97 <= ch <= 122:  # a to z in ASCII
-                    select_safari_tab(chr(ch))
-                elif 65 <= ch <= 90:  # A to Z in ASCII, indicating Shift + letter
-                    # Close the tab corresponding to the uppercase letter
+                    fShowFullTitle = not fShowFullTitle             # .   : toggle ShowFullTitle
+                elif 97 <= ch <= 122:                               # a-z : select Safari tab
+                    manage_safari_tab(chr(ch), close_tab=False)
+                elif 65 <= ch <= 90:                                # A-Z : close Safari tab
                     manage_safari_tab(chr(ch), close_tab=True)
-                elif ch == ord('/'):
+                elif ch == ord('/'):                                # /   : activate Safari window
                     activate_safari()
-                elif ch == ord('\''):  # Close Tab
-                    close_current_safari_tab()
-                elif ch == ord(';'):  # Reopen Closed Tabs
+                elif ch == ord('\''):                               # '   : close active tab
+                    close_current_safari_tab()                     
+                elif ch == ord(';'):                                # ;   : reopen closed tabs from close history stack
                     reopen_last_closed_tab()
-                elif ch == ord(','):
-                    search_mode = True
+                elif ch == ord(','):                                # ,   : Start Search Mode
+                    fSearchMode = True
+                elif ch == ord('['):
+                    fShowTabTimeActive = not fShowTabTimeActive     # [   : Show Tab Time Spent Active
                 elif ch == ord('q'):
                     break  # Exit the loop if 'q' is pressed
-
+        # LOOP FOR SEARCH MODE
         else:
             stdscr.addstr(0, 0, "Enter search query: " + search_query)
 
         ch = stdscr.getch()
-
         if ch == ord(','):
-            search_mode = not search_mode  # Toggle search mode
+            fSearchMode = not fSearchMode  # Toggle search mode
             search_query = ""  # Reset search query
-        elif ch == ord('q') and not search_mode:
+        elif ch == ord('q') and not fSearchMode:
             break  # Exit if 'q' is pressed and not in search mode
-        elif search_mode:
+        elif fSearchMode:
             if ch == 10:  # Enter key
                 # Perform search with the current query
                 perform_search(stdscr, search_query)
-                search_mode = False  # Exit search mode after search
+                fSearchMode = False  # Exit search mode after search
                 stdscr.getch()  # Wait for any key press to return
             elif ch == 127 or ch == 8:  # Handle backspace for search query
                 search_query = search_query[:-1]
@@ -413,9 +410,9 @@ def main_loop(stdscr):
                 search_query += chr(ch)
 
         stdscr.refresh()
-
         # time.sleep(0.1)
         
 
+# CONTINUE GLOBAL ---------------------------------------------------- #
 # Use curses.wrapper to setup and cleanup the terminal window automatically
 curses.wrapper(main_loop)
