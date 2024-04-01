@@ -5,6 +5,8 @@
 # ? - to copy address
 
 # ISSUE
+# Need to implement curses mouse and scroll control...
+
 
 # FEATURE TODO
 #2. Tab Decay and Cleanup
@@ -178,10 +180,6 @@ def manage_safari_tab(tab_letter, close_tab=False):
 # ~~~ END APPLESCRIPTS ~~~ #
 
 # ---- UI Functions ---- #
-# Define the show_tabs_full function to display tabs with full titles, removing parentheses content
-def set_terminal_title(title):
-    print(f"\33]0;{title}\a", end="", flush=True)
-
 def show_tabs_full(stdscr, tabs):
     stdscr.clear()
     for idx, tab in enumerate(tabs, start=1):
@@ -332,7 +330,6 @@ def perform_search(stdscr, query):
             offset += 1
 
 def main_loop(stdscr):
-    set_terminal_title("Safari Tabs CLI")
     ## Init Curses 
     curses.start_color()
     curses.use_default_colors()
