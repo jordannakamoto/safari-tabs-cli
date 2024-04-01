@@ -27,6 +27,9 @@
 
 # Tab Garden: Create a virtual garden where each tab represents a plant or flower. Users can nurture their tabs by watering them (opening them) regularly and watching them grow over time.
 
+# Idea... some function for sleeping the app or various features
+
+
 import curses
 import subprocess
 import string
@@ -38,7 +41,8 @@ import os
 
 #- DATA  ----------------------------------------------------------------#
 closed_tabs_stack = []    # Closed Tabs for Undo History
-tab_start_times   = {}    # Dictionary to store start times for each tab
+tab_create_times = {}     # Dictionary to store start times for each tab
+tab_start_times   = {}    # Dictionary to store the last start times for each tab
 tab_active_times  = {}    # Dictionary to store time active for each tab
 #========================================================================#
 
@@ -69,6 +73,23 @@ def get_safari_tabs():
         end repeat
     end tell
     return output & "]"
+    '''
+    return run_applescript(script)
+
+# Get currently active tab
+def get_active_safari_tab():
+    script = '''
+    tell application "Safari"
+        set output to "{}"
+        if (count of windows) > 0 then
+            set frontWindow to front window
+            set currentTab to current tab of frontWindow
+            set tabTitle to name of currentTab
+            set tabUrl to URL of currentTab
+            set output to "{\\"title\\": \\"" & tabTitle & "\\", \\"url\\": \\"" & tabUrl & "\\"}"
+        end if
+        return output
+    end tell
     '''
     return run_applescript(script)
 
@@ -124,6 +145,7 @@ def manage_safari_tab(tab_letter, close_tab=False):
 
     global closed_tabs_stack
     global tab_start_times
+    global tab_active_times
 
     # Store the start time when selecting a tab
     if not close_tab:
@@ -170,6 +192,7 @@ def manage_safari_tab(tab_letter, close_tab=False):
 # ---- UI Functions -----------------------------------------------------#
 def ui_show_tabs_full(stdscr, tabs):
     stdscr.clear()
+
     for idx, tab in enumerate(tabs, start=1):
         # Terminal Dimensions Check
         max_y, max_x = stdscr.getmaxyx()  
@@ -191,8 +214,10 @@ def ui_show_tabs_full(stdscr, tabs):
         stdscr.addstr(display_str)
     stdscr.refresh()
 
-def ui_show_tabs(stdscr, tabs):
+def ui_show_tabs(stdscr, tabs, show_times=False):
     stdscr.clear()
+    current_time = time.time()  # Fetch the current time for calculating ongoing durations
+
     for idx, tab in enumerate(tabs, start=1):
         # Terminal Dimensions Check
         max_y, max_x = stdscr.getmaxyx()  
@@ -234,23 +259,50 @@ def ui_show_tabs(stdscr, tabs):
         else:
             tab_url = ""
         
+        # TRY ADDDING THE DISPLAY STR
         try:
-            display_str = f"{string.ascii_lowercase[idx-1]}: {shortened_title} - {tab_url}\n"
+            display_str = f"{string.ascii_lowercase[idx-1]}: {shortened_title} - {tab_url}"
             # TODO 2: Active Tab Decoration... First I need to push the updater to tab list the background so we don't call it unless there are changes I guess...
             # active_tab_index = get_active_tab_index()  # Function to get the index of the active tab
             # # Check if this tab is active and adjust the display accordingly
             # display_str = f">{shortened_title} - {tab_url}\n" if idx == active_tab_index else f"{string.ascii_lowercase[idx-1]}: {shortened_title} - {tab_url}\n"
-            stdscr.addstr(display_str)
         except curses.error as e:
             display_str = "address loading..."
+        # OPTION FOR SHOWING TIME ACTIVE
+        if show_times:
+            # Initialize active_time_seconds to 0
+            active_time_seconds = 0
+            if tab['url'] in tab_start_times:  # If the tab is currently being tracked
+                # Calculate ongoing duration for currently active tab
+                # TODO: Analyze if this time is gathered efficiently
+                active_time_seconds = current_time - tab_start_times[tab['url']]
+            if tab['url'] in tab_active_times:  # If the tab has accumulated active time
+                active_time_seconds += tab_active_times.get(tab['url'], 0)
+
+            formatted_duration = format_duration(active_time_seconds)
+            # Append the duration to the tab's display information
+            display_str += f" [{formatted_duration}]"        
+        try:
+            display_str += "\n"
             stdscr.addstr(display_str)
+        except curses.error as e:
+            # Handling potential error due to terminal window size
+            pass
     stdscr.refresh()
 
+# UI Helpers ------------------------------------- #
 def ui_print_header(stdscr):
     curses.init_pair(1, 60, -1)
     stdscr.attron(curses.color_pair(1))
     stdscr.addstr("Safari Tabs\n")
     stdscr.attroff(curses.color_pair(1))
+
+def format_duration(seconds):
+    # Converts seconds to a string of the format "Xm Ys" for minutes and seconds
+    minutes = seconds // 60
+    seconds = seconds % 60
+    return f"{int(minutes)}m {int(seconds)}s"
+
 # ===== END UI Functions  ===============================================#
 
 # ---- Search -----------------------------------------------------------#
@@ -339,8 +391,12 @@ def main_loop(stdscr):
     fShowFullTitle       = False       # Toggle Display: full tab title
     fShowTabTimeActive   = False  # Toggle Display: how much time each tab has been open
     #=========#
+    #- DATA --#
+    activeTab = {'title': '', 'url': ''}
     search_query = ""
+    #---------#
 
+    # Start Main Loop #
     while True:
         stdscr.clear()
         ui_print_header(stdscr)
@@ -353,12 +409,39 @@ def main_loop(stdscr):
             # TODO: Put this in a background process
             if result.returncode == 0 and result.stdout:
                 try:
+                    active_tab_result = get_active_safari_tab()
+                    current_active_tab = json.loads(active_tab_result.stdout)
+                except json.JSONDecodeError:
+                    stdscr.addstr("Error decoding JSON for active tab\n")
+                if current_active_tab != activeTab:
+                    # The active tab has changed
+                    
+                    # SUB PROCEDURE FOR SETTING TIMERS #
+                    current_time = time.time()  # Get the current time
+                    # Ensure the active tab is in the start times tracking; if not, there's nothing to calculate
+                    if activeTab['url'] in tab_start_times:
+                        # Calculate the duration this tab has been active by subtracting the start time from the current time
+                        duration_active = current_time - tab_start_times[activeTab['url']]
+
+                        # If the tab already has accumulated active time, add to it; otherwise, start fresh
+                        if activeTab['url'] in tab_active_times:
+                            tab_active_times[activeTab['url']] += duration_active
+                        else:
+                            tab_active_times[activeTab['url']] = duration_active
+
+                    # Now, update activeTab to the newly active tab before setting its start time
+                    activeTab = current_active_tab
+
+                    # Finally, reset the start time for the newly active tab
+                    tab_start_times[activeTab['url']] = current_time
+                    # END TIMER SUBPROCEDURE #
+                try:
                     tabs = json.loads(result.stdout)
                     tabs = tabs[:26]                     #    Limit set to 26 tabs
                     if fShowFullTitle:
                         ui_show_tabs_full(stdscr, tabs)  # 1. Show tabs with full titles if mode has been toggled
                     else:
-                        ui_show_tabs(stdscr, tabs)       # 2. Show tabs in normal shortened mode
+                        ui_show_tabs(stdscr, tabs, fShowTabTimeActive)       # 2. Show tabs in normal shortened mode
                 except json.JSONDecodeError:
                     stdscr.addstr("Error decoding JSON\n")
             else:
