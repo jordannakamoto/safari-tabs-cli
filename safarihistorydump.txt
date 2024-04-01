@@ -1,0 +1,1 @@
+sqlite3 ~/Library/Safari/History.db "SELECT visit_time, title, url FROM history_items INNER JOIN history_visits ON history_items.id = history_visits.history_item"
