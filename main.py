@@ -4,8 +4,20 @@
 # holding . toggles details
 # ? - to copy address
 
+# ? Memory Persistence
+# For each favorited domain, register an emoji a color, alias or all to create the text string
+
 # ISSUE
 # Need to implement curses mouse and scroll control...
+# Might need special rule handling for youtube shorts, etc... timer might be tied to domain if tab changes
+# Not quite sure how to do that yet
+# Need to check for 1 word overflowing the basic view space
+# - jordannakamoto/safari-tabs-cl doesn't get trim
+# Catch state where safari isn't open
+# Doesn't handle multiple windows...
+
+# PROGRAM MEMORY UPDATE
+# virtualize the tab registry in the program so we don't have to do a loop to lookup every time we want to make an action...
 
 
 # FEATURE TODO
@@ -44,37 +56,26 @@ closed_tabs_stack = []    # Closed Tabs for Undo History
 tab_create_times = {}     # Dictionary to store start times for each tab
 tab_start_times   = {}    # Dictionary to store the last start times for each tab
 tab_active_times  = {}    # Dictionary to store time active for each tab
+windows = {}              # Dictionary to store windows and tabs contained in each window
+ui_letter_map = {}        # Map the ui letter to a tab  
 #========================================================================#
 
 def run_applescript(script):
     return subprocess.run(['osascript', '-e', script], capture_output=True, text=True)
+
+def run_applescript_file(script_path):
+    return subprocess.run(['osascript', script_path], capture_output=True, text=True)
+
 
 # TODO: implement pinging in background thread...
 # def run_applescript_background(script):
 #     subprocess.Popen(['osascript', '-e', script], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 # ~~~ APPLESCRIPTS ~~~  -------------------------------------------------#
+# maybe we can parallelize this for each window
 def get_safari_tabs():
-    script = '''
-    set output to "["
-    tell application "Safari"
-        set firstTab to true
-        repeat with aWindow in windows
-            repeat with aTab in tabs of aWindow
-                if firstTab then
-                    set firstTab to false
-                else
-                    set output to output & ", "
-                end if
-                set tabTitle to name of aTab
-                set tabUrl to URL of aTab
-                set output to output & "{\\"title\\": \\"" & tabTitle & "\\", \\"url\\": \\"" & tabUrl & "\\"}"
-            end repeat
-        end repeat
-    end tell
-    return output & "]"
-    '''
-    return run_applescript(script)
+    script_path = 'get_safari_tabs.scpt'
+    return run_applescript_file(script_path)
 
 # Get currently active tab
 def get_active_safari_tab():
@@ -142,51 +143,40 @@ def activate_safari():
 
 # Manage Safari Tab - select or close tab!
 def manage_safari_tab(tab_letter, close_tab=False):
-
     global closed_tabs_stack
     global tab_start_times
     global tab_active_times
+    global windows
+    global ui_letter_map
 
-    # Store the start time when selecting a tab
     if not close_tab:
         tab_start_times[tab_letter] = time.time()
 
-    letter_to_index = dict(zip(string.ascii_lowercase, range(1, 27)))
-    tab_index = letter_to_index.get(tab_letter.lower(), 0)  # Ensure lowercase for indexing
+    target_tab = ui_letter_map[tab_letter]
+    
+    # Found the tab, now decide to close or activate
     if close_tab:
-        # Fetch the URL of the tab before closing, to save it for undo
-        get_url_script = f'''
-        tell application "Safari"
-            URL of tab {tab_index} of window 1
-        end tell
-        '''
-        result = run_applescript(get_url_script)
-        if result.stdout:
-            closed_tabs_stack.append(result.stdout.strip())  # Push the URL onto the stack
-        
-        # AppleScript to close the tab
-        script = f'''
-        tell application "Safari"
-            close tab {tab_index} of window 1
-        end tell
-        '''
+        close_tab_in_safari(target_tab["window"], target_tab["tab_num"])
+        closed_tabs_stack.append(target_tab['url'])  # Log the closed tab's URL for undo functionality
     else:
-        # AppleScript to activate the tab (as before)
-        script = f'''
-        tell application "Safari"
-            set counter to 1
-            repeat with aWindow in windows
-                repeat with aTab in tabs of aWindow
-                    if counter = {tab_index} then
-                        set current tab of aWindow to aTab
-                        return
-                    end if
-                    set counter to counter + 1
-                end repeat
-            end repeat
-        end tell
-        '''
-    return run_applescript(script)
+        activate_tab_in_safari(target_tab["window"], target_tab["tab_num"])
+    return  # Exit after handling the tab
+
+
+def close_tab_in_safari(window_id, tab_index):
+    script_path = "close_tab_in_safari.scpt"  # Update this path
+    # Convert arguments to strings
+    args = [str(window_id), str(tab_index)]
+    subprocess.run(["osascript", script_path] + args, capture_output=True, text=True)
+
+def activate_tab_in_safari(window_id, tab_index):
+    script_path = "activate_tab_in_safari.scpt"  # Update this path
+    # Convert arguments to strings
+    args = [str(window_id), str(tab_index)]
+    subprocess.run(["osascript", script_path] + args, capture_output=True, text=True)
+
+
+
 # ~~~ END APPLESCRIPTS ~~~ ==============================================#
 
 # ---- UI Functions -----------------------------------------------------#
@@ -376,7 +366,17 @@ def perform_search(stdscr, query):
         elif ch == ord('j') and offset < len(results) - max_y:  # Scroll down
             offset += 1
 # ===== END Search  =====================================================#
-            
+
+# Program Data Helpers
+
+# Function to check if a tab already exists in the list
+def tab_exists_in_window(tab_list, tab):
+    for existing_tab in tab_list:
+        if existing_tab['title'] == tab['title'] and existing_tab['url'] == tab['url']:
+            return True
+    return False
+
+
 #------------------------------------------------------------------------@
 #       MAIN
 #------------------------------------------------------------------------@
@@ -394,6 +394,8 @@ def main_loop(stdscr):
     #- DATA --#
     activeTab = {'title': '', 'url': ''}
     search_query = ""
+    global windows
+    global ui_letter_map
     #---------#
 
     # Start Main Loop #
@@ -405,9 +407,37 @@ def main_loop(stdscr):
             global closed_tabs_stack
 
             # Fetch and process tabs
-            result = get_safari_tabs()
             # TODO: Put this in a background process
-            if result.returncode == 0 and result.stdout:
+            result = get_safari_tabs().stdout.strip()
+
+            # Consider limit on number of tabs
+            tabs_list = json.loads(result)
+            
+            # Organize tabs by window
+            # and assign UI letter
+            # ! Currently only supports up to z
+            tab_letters = string.ascii_lowercase  # Provides 'a' to 'z'
+            letter_index = 0                      # Start with the first letter
+            for tab in tabs_list:
+                window_id = tab['window']
+                tab_info = {"title": tab['title'], "url": tab['url']}
+                
+                if window_id not in windows:
+                    windows[window_id] = []
+                    
+                if not tab_exists_in_window(windows[window_id], tab_info):
+                    if letter_index < len(tab_letters):     # Ensure there's a letter to assign
+                        letter = tab_letters[letter_index]
+                        tab["tab_num"] = len(windows[window_id])+1
+                        ui_letter_map[letter] = tab
+                        windows[window_id].append(tab_info)
+                        letter_index += 1                   # Move to the next letter for the next tab
+                    else:
+                        print("Ran out of letters to assign to tabs.")
+                        break  # or continue, depending on your needs
+
+            # TIMER STUFF
+            if result: # ? removed result.returncode == 0 and 
                 try:
                     active_tab_result = get_active_safari_tab()
                     current_active_tab = json.loads(active_tab_result.stdout)
@@ -436,12 +466,11 @@ def main_loop(stdscr):
                     tab_start_times[activeTab['url']] = current_time
                     # END TIMER SUBPROCEDURE #
                 try:
-                    tabs = json.loads(result.stdout)
-                    tabs = tabs[:26]                     #    Limit set to 26 tabs
+                    # ? EDIT: REFACTOR FOR NEW DATA STRUCTURE
                     if fShowFullTitle:
-                        ui_show_tabs_full(stdscr, tabs)  # 1. Show tabs with full titles if mode has been toggled
+                        ui_show_tabs_full(stdscr, tabs_list)                      # 1. Show tabs with full titles if mode has been toggled
                     else:
-                        ui_show_tabs(stdscr, tabs, fShowTabTimeActive)       # 2. Show tabs in normal shortened mode
+                        ui_show_tabs(stdscr, tabs_list, fShowTabTimeActive)       # 2. Show tabs in normal shortened mode
                 except json.JSONDecodeError:
                     stdscr.addstr("Error decoding JSON\n")
             else:
@@ -458,7 +487,7 @@ def main_loop(stdscr):
                 elif 97 <= ch <= 122:                               # a-z : select Safari tab
                     manage_safari_tab(chr(ch), close_tab=False)
                 elif 65 <= ch <= 90:                                # A-Z : close Safari tab
-                    manage_safari_tab(chr(ch), close_tab=True)
+                    manage_safari_tab(chr(ch).lower(), close_tab=True)
                 elif ch == ord('/'):                                # /   : activate Safari window
                     activate_safari()
                 elif ch == ord('\''):                               # '   : close active tab
