@@ -152,7 +152,11 @@ def manage_safari_tab(tab_letter, close_tab=False):
     if not close_tab:
         tab_start_times[tab_letter] = time.time()
 
-    target_tab = ui_letter_map[tab_letter]
+    try:
+        target_tab = ui_letter_map[tab_letter]
+    except:
+        print("error: target tab not found")
+        return
     
     # Found the tab, now decide to close or activate
     if close_tab:
@@ -205,7 +209,6 @@ def ui_show_tabs_full(stdscr, tabs):
     stdscr.refresh()
 
 def ui_show_tabs(stdscr, tabs, show_times=False):
-    stdscr.clear()
     current_time = time.time()  # Fetch the current time for calculating ongoing durations
 
     for idx, tab in enumerate(tabs, start=1):
@@ -396,6 +399,8 @@ def main_loop(stdscr):
     search_query = ""
     global windows
     global ui_letter_map
+    global closed_tabs_stack
+    test = 0
     #---------#
 
     # Start Main Loop #
@@ -403,8 +408,11 @@ def main_loop(stdscr):
         stdscr.clear()
         ui_print_header(stdscr)
 
+        stdscr.addstr(str(test))
+        test+= 1
+        stdscr.addstr("hello")
+
         if not fSearchMode: # <------- If we're not in search mode, provide the normal tab browser UI
-            global closed_tabs_stack
 
             # Fetch and process tabs
             # TODO: Put this in a background process
@@ -425,6 +433,7 @@ def main_loop(stdscr):
                 if window_id not in windows:
                     windows[window_id] = []
                     
+                # for some reason new windows aren't being supported
                 if not tab_exists_in_window(windows[window_id], tab_info):
                     if letter_index < len(tab_letters):     # Ensure there's a letter to assign
                         letter = tab_letters[letter_index]
@@ -478,7 +487,7 @@ def main_loop(stdscr):
 
             # START GET USER KEY INPUT ... Non-blocking input with timeout
             stdscr.nodelay(True) # Make getch() non-blocking
-            stdscr.timeout(100)  # Reduced timeout for more responsive toggle
+            # stdscr.timeout(100)  # Reduced timeout for more responsive toggle
             
             ch = stdscr.getch()
             if ch != -1:                                 # If a key was pressed
